@@ -25,21 +25,21 @@ chmod +x install.sh
 ./install.sh
 ```
 
-##📂 目录结构
-安装完成后，程序将位于 /root/nlbw/：
+## 📂 目录结构
+- **安装完成后，程序将位于** /root/nlbw/：
 
-tgbot/main.py: 核心代码
+- **tgbot/main.py**: 核心代码
 
-tgbot/config.json: 配置文件 (包含 Token)
+- **tgbot/config.json**: 配置文件 (包含 Token)
 
-tgbot/venv/: 虚拟环境
+- **tgbot/venv/**: 虚拟环境
 
-##🛠️ 常用管理命令
-重启机器人: systemctl restart nlbw_bot
+## 🛠️ 常用管理命令
+- **重启机器人**: systemctl restart nlbw_bot
 
-查看运行日志: journalctl -u nlbw_bot -f
+- **查看运行日志**: journalctl -u nlbw_bot -f
 
-停止机器人: systemctl stop nlbw_bot
+- **停止机器人**: systemctl stop nlbw_bot
 
 
 
