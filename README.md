@@ -21,7 +21,8 @@ cd nlbw-bot-project
 
 # 2. 授权并安装
 chmod +x install.sh
-./install.sh  \`\`\`
+./install.sh
+\`\`\`
 
 ##📂 目录结构
 **安装完成后，程序将位于 /root/nlbw/：**
