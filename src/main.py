@@ -103,11 +103,15 @@ async def get_vnstat_traffic():
 # ================= 业务逻辑 (Xray/Logs) =================
 
 def manage_xray_config(action, data=None):
-    """统一管理 Xray 配置文件读写"""
+    """
+    v4.0 核心逻辑:
+    统一管理 Xray 配置文件读写，确保保留 WARP 和 Routing 配置
+    """
     path = CFG['xray_config']
     if not os.path.exists(path): return None
     
     try:
+        # 读取完整配置 (保留 WARP/Routing)
         with open(path, 'r', encoding='utf-8') as f:
             config = json.load(f)
         
@@ -126,6 +130,7 @@ def manage_xray_config(action, data=None):
         elif action == "get_vless":
             return vless_inbound['settings']['clients'] if vless_inbound else []
 
+        # 写回配置
         if action in ["add_socks", "del_socks"]:
             with open(path, 'w', encoding='utf-8') as f:
                 json.dump(config, f, indent=2)
@@ -136,7 +141,7 @@ def manage_xray_config(action, data=None):
 
 def get_vless_link(uid, name):
     domain = CFG['domain']
-    return f"vless://{uid}@{domain}:443?encryption=none&security=none&type=ws&host={domain}&path=/dvJcCk#{name}"
+    return f"vless://{uid}@{domain}:443?encryption=none&security=tls&type=ws&host={domain}&path=/dvJcCk#{name}"
 
 # ================= 交互菜单 =================
 
@@ -154,7 +159,7 @@ def back_btn(data="back"):
 
 @app.on_message(filters.command("start") & filters.user(ADMIN_IDS))
 async def start_handler(c, m):
-    await m.reply_text(f"👋 **你好，管理员！**\n这是你的服务器控制中心。", reply_markup=main_menu())
+    await m.reply_text(f"👋 **NLBW Ultra 控制台**\n系统全功能已就绪。", reply_markup=main_menu())
 
 @app.on_callback_query()
 async def callback_handler(c, q):
@@ -163,7 +168,7 @@ async def callback_handler(c, q):
 
     try:
         if d == "back":
-            await q.edit_message_text("🖥️ **控制面板**", reply_markup=main_menu())
+            await q.edit_message_text("🖥️ **NLBW 控制面板**", reply_markup=main_menu())
 
         # --- 状态模块 ---
         elif d == "status":
@@ -192,7 +197,7 @@ async def callback_handler(c, q):
                                  InlineKeyboardButton("🗑️ 删除", callback_data=f"del_s|{a['user']}")])
             btns.append([InlineKeyboardButton("➕ 添加账号 (/addsocks 用户 密码)", callback_data="nop")])
             btns.append(back_btn())
-            await q.edit_message_text("👻 **Socks5 账号列表 (Port 16111)**", reply_markup=InlineKeyboardMarkup(btns))
+            await q.edit_message_text("👻 **Socks5 账号管理**", reply_markup=InlineKeyboardMarkup(btns))
 
         elif d.startswith("del_s|"):
             user = d.split("|")[1]
@@ -223,7 +228,7 @@ async def callback_handler(c, q):
             await q.message.reply_photo(bio, caption=f"👤 **用户**: `{name}`\n🔗 **链接**: `{link}`")
             await q.answer()
 
-        # --- 日志模块 (已补全) ---
+        # --- 日志模块 ---
         elif d == "logs_menu":
             btns = [
                 [InlineKeyboardButton("❌ 错误日志 (Error)", callback_data="v_err")],
@@ -234,12 +239,12 @@ async def callback_handler(c, q):
             await q.edit_message_text("📜 **日志与诊断中心**", reply_markup=InlineKeyboardMarkup(btns))
         
         elif d == "v_err":
-            log = await get_shell_output(f"tail -n 20 {LOG_FILES[0]}") # 错误日志
+            log = await get_shell_output(f"tail -n 20 {LOG_FILES[0]}") 
             await q.message.reply_text(f"📜 **Xray 错误日志 (最后20行)**\n```\n{log[-4000:]}\n```")
             await q.answer()
 
         elif d == "v_acc":
-            log = await get_shell_output(f"tail -n 20 {LOG_FILES[1]}") # 访问日志
+            log = await get_shell_output(f"tail -n 20 {LOG_FILES[1]}") 
             await q.message.reply_text(f"🌐 **Xray 访问日志 (最后20行)**\n```\n{log[-4000:]}\n```")
             await q.answer()
         
