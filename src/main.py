@@ -9,7 +9,6 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 import qrcode
 
 # ================= 配置加载 =================
-# 自动定位当前目录下的 config.json
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 
@@ -21,8 +20,9 @@ def load_config():
         return json.load(f)
 
 CFG = load_config()
-ADMIN_IDS = [int(x) for x in CFG['admin_ids']] # 确保是整数列表
+ADMIN_IDS = [int(x) for x in CFG['admin_ids']]
 LOG_FILES = CFG.get('log_files', ["/var/log/xray/error.log", "/var/log/xray/access.log"])
+XRAY_CONF_PATH = CFG.get('xray_config', "/usr/local/etc/xray/config.json")
 
 # 日志配置
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -102,16 +102,26 @@ async def get_vnstat_traffic():
 
 # ================= 业务逻辑 (Xray/Logs) =================
 
+def get_real_xray_config():
+    """
+    [新增] 读取真实的 Xray 配置文件
+    用于获取动态生成的 UUID、Path 和 Socks5 端口
+    """
+    if not os.path.exists(XRAY_CONF_PATH):
+        return None
+    try:
+        with open(XRAY_CONF_PATH, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        logger.error(f"Read Xray Config Error: {e}")
+        return None
+
 def manage_xray_config(action, data=None):
-    """
-    v4.0 核心逻辑:
-    统一管理 Xray 配置文件读写，确保保留 WARP 和 Routing 配置
-    """
-    path = CFG['xray_config']
+    """统一管理 Xray 配置文件读写"""
+    path = XRAY_CONF_PATH
     if not os.path.exists(path): return None
     
     try:
-        # 读取完整配置 (保留 WARP/Routing)
         with open(path, 'r', encoding='utf-8') as f:
             config = json.load(f)
         
@@ -120,6 +130,8 @@ def manage_xray_config(action, data=None):
 
         if action == "get_socks":
             return socks_inbound['settings']['accounts'] if socks_inbound else []
+        elif action == "get_socks_port": # 新增：获取真实端口
+            return socks_inbound['port'] if socks_inbound else 0
         elif action == "add_socks":
             if not socks_inbound: return False
             if any(u['user'] == data['user'] for u in socks_inbound['settings']['accounts']): return False
@@ -130,7 +142,6 @@ def manage_xray_config(action, data=None):
         elif action == "get_vless":
             return vless_inbound['settings']['clients'] if vless_inbound else []
 
-        # 写回配置
         if action in ["add_socks", "del_socks"]:
             with open(path, 'w', encoding='utf-8') as f:
                 json.dump(config, f, indent=2)
@@ -139,9 +150,25 @@ def manage_xray_config(action, data=None):
         logger.error(f"Config Error: {e}")
         return False
 
-def get_vless_link(uid, name):
-    domain = CFG['domain']
-    return f"vless://{uid}@{domain}:443?encryption=none&security=tls&type=ws&host={domain}&path=/dvJcCk#{name}"
+def get_vless_link(name):
+    """
+    [修改] 动态读取配置生成链接
+    不再使用硬编码的 Path
+    """
+    config = get_real_xray_config()
+    if not config: return "Error: Config Not Found"
+    
+    try:
+        vless_inbound = next((i for i in config.get('inbounds', []) if i.get('protocol') == 'vless'), None)
+        if not vless_inbound: return "Error: VLESS Inbound Not Found"
+
+        uid = vless_inbound['settings']['clients'][0]['id']
+        path = vless_inbound['streamSettings']['wsSettings']['path']
+        domain = CFG['domain']
+        
+        return f"vless://{uid}@{domain}:443?encryption=none&security=tls&type=ws&host={domain}&path={path}#{name}"
+    except Exception as e:
+        return f"Error Generating Link: {str(e)}"
 
 # ================= 交互菜单 =================
 
@@ -187,45 +214,54 @@ async def callback_handler(c, q):
             )
             await q.edit_message_text(text, reply_markup=main_menu())
 
-        # --- Socks5 模块 ---
+        # --- Socks5 模块 (修复版) ---
         elif d == "users_socks":
             accs = manage_xray_config("get_socks")
+            port = manage_xray_config("get_socks_port") # 获取真实端口
+            
+            if not accs:
+                await q.answer("⚠️ 未找到 Socks5 账号，请检查配置", show_alert=True)
+                return
+
+            # 构建显示文本
+            msg = f"👻 **Socks5 账号管理**\n端口: `{port}`\n➖➖➖➖➖\n"
             btns = []
-            if accs:
-                for a in accs:
-                    btns.append([InlineKeyboardButton(f"👤 {a['user']} | 🔑 {a['pass']}", callback_data="nop"), 
-                                 InlineKeyboardButton("🗑️ 删除", callback_data=f"del_s|{a['user']}")])
+            for a in accs:
+                msg += f"👤 `{a['user']}` | 🔑 `{a['pass']}`\n"
+                btns.append([InlineKeyboardButton(f"🗑️ 删除 {a['user']}", callback_data=f"del_s|{a['user']}")])
+            
             btns.append([InlineKeyboardButton("➕ 添加账号 (/addsocks 用户 密码)", callback_data="nop")])
             btns.append(back_btn())
-            await q.edit_message_text("👻 **Socks5 账号管理**", reply_markup=InlineKeyboardMarkup(btns))
+            
+            # 使用 try-catch 防止消息未变动报错
+            try:
+                await q.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(btns))
+            except:
+                await q.answer("已刷新列表")
 
         elif d.startswith("del_s|"):
             user = d.split("|")[1]
             if manage_xray_config("del_socks", {"user": user}):
                 await asyncio.create_subprocess_shell("systemctl restart xray")
                 await q.answer(f"✅ 用户 {user} 已删除", show_alert=True)
-                # 重新加载列表
+                # 重新加载列表 (递归调用自己刷新界面)
                 await callback_handler(c, type('obj', (object,), {'data': 'users_socks', 'message': q.message, 'from_user': q.from_user, 'answer': q.answer, 'edit_message_text': q.edit_message_text})) 
             else:
                 await q.answer("❌ 删除失败", show_alert=True)
 
-        # --- VLESS 模块 ---
+        # --- VLESS 模块 (修复版) ---
         elif d == "users_vless":
-            clients = manage_xray_config("get_vless")
-            btns = [[InlineKeyboardButton(f"👤 {u.get('email','未知')}", callback_data="nop"), 
-                     InlineKeyboardButton("📱 二维码", callback_data=f"qr|{u['id']}|{u.get('email','未知')}")] for u in clients]
-            btns.append(back_btn())
-            await q.edit_message_text("👥 **VLESS 用户列表**", reply_markup=InlineKeyboardMarkup(btns))
-
-        elif d.startswith("qr|"):
-            _, uid, name = d.split("|")
-            link = get_vless_link(uid, name)
+            # 这里调用 get_vless_link 会动态读取 UUID 和 Path
+            link = get_vless_link("NLBW-User")
+            
+            # 生成二维码
             qr = qrcode.QRCode(box_size=10, border=2)
             qr.add_data(link); qr.make(fit=True)
             bio = io.BytesIO()
             qr.make_image(fill_color="black", back_color="white").save(bio, 'PNG')
             bio.seek(0)
-            await q.message.reply_photo(bio, caption=f"👤 **用户**: `{name}`\n🔗 **链接**: `{link}`")
+            
+            await q.message.reply_photo(bio, caption=f"👤 **VLESS 节点信息**\n\n🔗 **链接**: `{link}`")
             await q.answer()
 
         # --- 日志模块 ---
