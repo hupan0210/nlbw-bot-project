@@ -109,7 +109,7 @@ sleep 2
 green "📝 [阶段 1] 业务配置"
 
 while true; do
-    read -r -p "请输入域名 (例如 vpn.example.com): " DOMAIN
+    read -r -p "请输入域名 (例如 112583.xyz): " DOMAIN
     if [[ -n "$DOMAIN" ]]; then break; fi
 done
 
@@ -150,7 +150,7 @@ fi
 # 2.3 配置 Nginx
 WEB_ROOT="/var/www/${DOMAIN}/html"
 mkdir -p "$WEB_ROOT"
-echo "<h1>NLBW Node Active</h1>" > "$WEB_ROOT/index.html"
+echo "<h1>NLBW：https://github.com/hupan0210/nlbw-bot-project</h1>" > "$WEB_ROOT/index.html"
 chown -R www-data:www-data "/var/www/${DOMAIN}"
 
 # 2.4 申请证书
