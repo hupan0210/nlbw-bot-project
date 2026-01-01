@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# NLBW Ultra: 全栈节点自动化部署系统 
+# NLBW Ultra: 全栈节点自动化部署系统
 # 功能: 系统初始化 + Swap/BBR + 防火墙 + WARP解锁 + 定时战报 + Python机器人
 # 部署路径: /opt/nlbw
 # ==============================================================================
@@ -69,7 +69,7 @@ else
     green "✅ BBR 已处于开启状态"
 fi
 
-# 0.5 自动防火墙 (Auto Firewall) - NEW!
+# 0.5 自动防火墙 (Auto Firewall)
 green "🛡️ [5/5] 配置自动防火墙..."
 SSH_PORT=$(grep "^Port" /etc/ssh/sshd_config | head -n 1 | awk '{print $2}')
 SSH_PORT=${SSH_PORT:-22} # 默认为 22
@@ -150,7 +150,7 @@ if ! command -v xray &> /dev/null; then
     bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >/dev/null
 fi
 
-# 2.3 安装 WARP (如果启用) - NEW!
+# 2.3 安装 WARP (如果启用)
 WARP_PORT=40000
 if [[ "$WARP_ENABLE" == "true" ]]; then
     green "☁️ 正在安装 Cloudflare WARP 官方客户端..."
