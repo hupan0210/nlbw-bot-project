@@ -71,7 +71,7 @@ fi
 
 # 0.5 自动防火墙 (Auto Firewall)
 green "🛡️ [5/5] 配置自动防火墙..."
-SSH_PORT=$(grep "^Port" /etc/ssh/sshd_config | head -n 1 | awk '{print $2}')
+SSH_PORT=$(grep "^Port" /etc/ssh/sshd_config | head -n 1 | awk '{print $2}' || true)
 SSH_PORT=${SSH_PORT:-22} # 默认为 22
 
 if command -v ufw >/dev/null; then
