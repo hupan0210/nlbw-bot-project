@@ -1,74 +1,292 @@
 #!/bin/bash
-# ==========================================
-# NLBW 机器人自动化部署脚本 v2.0 (Git版)
-# ==========================================
+# ==============================================================================
+# NLBW Ultra: 全栈节点自动化部署系统 
+# 功能: 系统初始化 + Swap/BBR + 防火墙 + WARP解锁 + 定时战报 + Python机器人
+# 部署路径: /opt/nlbw
+# ==============================================================================
 
-# 定义颜色
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-BLUE='\033[0;36m'
-PLAIN='\033[0m'
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
 
-# 0. 权限与路径检查
-[[ $EUID -ne 0 ]] && echo -e "${RED}❌ 错误: 必须使用 root 用户运行！${PLAIN}" && exit 1
-
-# 获取当前脚本所在目录 (即 Git Clone 下来的目录)
-CURRENT_DIR=$(cd "$(dirname "$0")";pwd)
-WORK_DIR="/root/nlbw"
+# --- 全局配置 ---
+WORK_DIR="/opt/nlbw"
 BOT_DIR="$WORK_DIR/tgbot"
+SCRIPT_DIR="$WORK_DIR/scripts"
+XRAY_CONF="/usr/local/etc/xray/config.json"
+XRAY_LOG_DIR="/var/log/xray"
+
+# --- 颜色输出 ---
+green(){ echo -e "\033[1;32m$1\033[0m"; }
+yellow(){ echo -e "\033[1;33m$1\033[0m"; }
+red(){ echo -e "\033[1;31m$1\033[0m"; }
+
+# --- 权限检查 ---
+if [[ $EUID -ne 0 ]]; then red "❌ 错误: 必须使用 root 运行"; exit 1; fi
 
 clear
-echo -e "${BLUE}================================================${PLAIN}"
-echo -e "${BLUE}    🤖 NLBW 机器人部署系统 (Git Production)     ${PLAIN}"
-echo -e "${BLUE}================================================${PLAIN}"
+echo -e "\033[1;36m================================================\033[0m"
+echo -e "\033[1;36m      🤖 NLBW 全栈节点部署系统 (Ultra v4.0)     \033[0m"
+echo -e "\033[1;36m================================================\033[0m"
 
-# 1. 检查源文件是否存在
-if [ ! -f "$CURRENT_DIR/src/main.py" ] || [ ! -f "$CURRENT_DIR/requirements.txt" ]; then
-    echo -e "${RED}❌ 错误: 在当前目录下找不到 src/main.py 或 requirements.txt${PLAIN}"
-    echo -e "请确保你已经完整拉取了 Git 仓库，并进入了项目根目录运行此脚本。"
-    exit 1
+# ==============================================================================
+# 0. 系统初始化与安全基线
+# ==============================================================================
+green "🚀 [阶段 0] 系统初始化与安全加固"
+
+# 0.1 更新与基础工具
+green "📦 [1/5] 更新系统并安装必备工具..."
+apt-get update -y && apt-get upgrade -y
+apt-get install -y curl wget git htop vim jq tar gzip unzip socat cron lsb-release gnupg >/dev/null 2>&1
+
+# 0.2 时区
+green "🕒 [2/5] 同步时区至 Asia/Shanghai..."
+timedatectl set-timezone Asia/Shanghai
+
+# 0.3 智能 Swap
+green "💾 [3/5] 检查内存配置..."
+PHY_MEM=$(free -m | grep Mem | awk '{print $2}')
+SWAP_MEM=$(free -m | grep Swap | awk '{print $2}')
+if [ "$PHY_MEM" -le 2048 ] && [ "$SWAP_MEM" -eq 0 ]; then
+    yellow "⚠️ 物理内存不足 2GB，正在创建 Swap 防止崩溃..."
+    fallocate -l 2G /swapfile
+    chmod 600 /swapfile
+    mkswap /swapfile
+    swapon /swapfile
+    echo '/swapfile none swap sw 0 0' >> /etc/fstab
+    green "✅ 2GB Swap 已启用"
+else
+    green "✅ 内存状态良好"
 fi
 
-# 2. 创建系统级目录
-echo -e "${YELLOW}📂 正在构建目录结构: $BOT_DIR ...${PLAIN}"
-mkdir -p "$BOT_DIR"
+# 0.4 BBR 加速
+green "🚀 [4/5] 检查 BBR 加速..."
+if ! sysctl net.ipv4.tcp_congestion_control | grep -q "bbr"; then
+    echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+    echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+    sysctl -p >/dev/null 2>&1
+    green "✅ BBR 已开启"
+else
+    green "✅ BBR 已处于开启状态"
+fi
 
-# 3. 安装系统依赖
-echo -e "${YELLOW}📦 正在检查系统依赖 (Python, Pip, Vnstat, FFmpeg)...${PLAIN}"
-if [ -f /etc/debian_version ]; then
+# 0.5 自动防火墙 (Auto Firewall) - NEW!
+green "🛡️ [5/5] 配置自动防火墙..."
+SSH_PORT=$(grep "^Port" /etc/ssh/sshd_config | head -n 1 | awk '{print $2}')
+SSH_PORT=${SSH_PORT:-22} # 默认为 22
+
+if command -v ufw >/dev/null; then
+    ufw allow 80/tcp
+    ufw allow 443/tcp
+    ufw allow ${SSH_PORT}/tcp
+    # 允许 Socks5 端口范围 (防止改端口后连不上)
+    ufw allow 20000:50000/tcp
+    ufw --force enable
+    green "✅ UFW 防火墙规则已更新"
+elif command -v firewall-cmd >/dev/null; then
+    firewall-cmd --permanent --add-service=http
+    firewall-cmd --permanent --add-service=https
+    firewall-cmd --permanent --add-port=${SSH_PORT}/tcp
+    firewall-cmd --permanent --add-port=20000-50000/tcp
+    firewall-cmd --reload
+    green "✅ Firewalld 规则已更新"
+else
+    iptables -A INPUT -p tcp --dport 80 -j ACCEPT
+    iptables -A INPUT -p tcp --dport 443 -j ACCEPT
+    iptables -A INPUT -p tcp --dport ${SSH_PORT} -j ACCEPT
+    iptables -I INPUT -p tcp --dport 20000:50000 -j ACCEPT
+    green "✅ Iptables 规则已更新 (临时)"
+fi
+
+echo -e "\n\033[1;32m🎉 系统基线环境准备就绪！\033[0m\n"
+sleep 2
+
+# ==============================================================================
+# 1. 业务配置采集
+# ==============================================================================
+green "📝 [阶段 1] 业务配置"
+
+while true; do
+    read -r -p "请输入域名 (例如 vpn.example.com): " DOMAIN
+    if [[ -n "$DOMAIN" ]]; then break; fi
+done
+
+read -r -p "请输入邮箱 (默认: admin@$DOMAIN): " EMAIL
+EMAIL=${EMAIL:-admin@$DOMAIN}
+
+yellow "🤖 配置 Telegram 管理机器人"
+while true; do
+    read -r -p "Bot Token: " BOT_TOKEN
+    if [[ -n "$BOT_TOKEN" ]]; then break; fi
+done
+
+while true; do
+    read -r -p "管理员 ID (多个用逗号分隔): " ADMIN_IDS
+    if [[ -n "$ADMIN_IDS" ]]; then break; fi
+done
+
+# 询问是否开启 WARP
+yellow "🎥 是否开启 WARP 流媒体解锁 (Netflix/Disney+)? [y/N]"
+read -r WARP_CHOICE
+WARP_ENABLE=false
+if [[ "$WARP_CHOICE" =~ ^[Yy]$ ]]; then WARP_ENABLE=true; fi
+
+# 生成随机凭证
+UUID="$(cat /proc/sys/kernel/random/uuid)"
+WS_PATH="/$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 6)"
+SOCKS_PORT=$(shuf -i 20000-50000 -n 1)
+SOCKS_USER="u$(head /dev/urandom | tr -dc a-z0-9 | head -c 6)"
+SOCKS_PASS=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 12)
+
+# ==============================================================================
+# 2. 基础设施部署
+# ==============================================================================
+green "📦 [阶段 2] 安装核心组件"
+
+# 2.1 安装基础
+apt-get install -y nginx certbot python3-certbot-nginx python3 python3-pip python3-venv vnstat ffmpeg >/dev/null 2>&1
+
+# 2.2 安装 Xray
+if ! command -v xray &> /dev/null; then
+    bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >/dev/null
+fi
+
+# 2.3 安装 WARP (如果启用) - NEW!
+WARP_PORT=40000
+if [[ "$WARP_ENABLE" == "true" ]]; then
+    green "☁️ 正在安装 Cloudflare WARP 官方客户端..."
+    # 添加官方源
+    curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+    echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/cloudflare-client.list >/dev/null
     apt-get update -y >/dev/null 2>&1
-    apt-get install -y python3 python3-pip python3-venv vnstat ffmpeg >/dev/null 2>&1
-elif [ -f /etc/redhat-release ]; then
-    yum install -y python3 python3-pip python3-venv vnstat ffmpeg >/dev/null 2>&1
+    apt-get install -y cloudflare-warp >/dev/null 2>&1
+    
+    # 注册并配置为 Socks5 模式 (最稳定的模式，不影响 SSH)
+    green "🔗 注册 WARP..."
+    warp-cli register --accept-tos >/dev/null 2>&1 || true # 可能已注册
+    warp-cli set-mode proxy >/dev/null 2>&1
+    warp-cli set-proxy-port $WARP_PORT >/dev/null 2>&1
+    warp-cli connect >/dev/null 2>&1
+    
+    # 检查连接
+    sleep 3
+    if curl -s -x socks5h://127.0.0.1:$WARP_PORT https://www.cloudflare.com/cdn-cgi/trace | grep -q "warp=on"; then
+        green "✅ WARP 启动成功 (Socks5 Port: $WARP_PORT)"
+    else
+        red "⚠️ WARP 启动失败或网络不通，后续将回退至直连模式。"
+        WARP_ENABLE=false
+    fi
 fi
-echo -e "${GREEN}✅ 系统依赖准备就绪${PLAIN}"
 
-# 4. 配置 Python 虚拟环境
-echo -e "${YELLOW}🐍 正在配置 Python 虚拟环境...${PLAIN}"
-if [ ! -d "$BOT_DIR/venv" ]; then
-    python3 -m venv "$BOT_DIR/venv"
+# 2.4 配置 Nginx
+WEB_ROOT="/var/www/${DOMAIN}/html"
+mkdir -p "$WEB_ROOT"
+echo "<h1>NLBW Node Active</h1>" > "$WEB_ROOT/index.html"
+chown -R www-data:www-data "/var/www/${DOMAIN}"
+
+# 2.5 申请证书
+systemctl stop nginx
+certbot certonly --standalone -d "$DOMAIN" --email "$EMAIL" --agree-tos --non-interactive >/dev/null 2>&1 || { red "❌ 证书申请失败，请检查域名解析"; exit 1; }
+systemctl start nginx
+
+# 2.6 生成 Xray 配置 (动态生成)
+green "⚙️ 生成 Xray 配置文件 (智能路由)..."
+mkdir -p "$XRAY_LOG_DIR"
+
+# 构建 Outbounds 配置
+OUTBOUNDS='[{"protocol": "freedom","tag": "direct"}'
+RULES='{"type": "field","outboundTag": "direct","domain": ["geosite:cn"]}'
+
+if [[ "$WARP_ENABLE" == "true" ]]; then
+    # 添加 WARP 出口
+    OUTBOUNDS+=',{"protocol": "socks","settings": {"servers": [{"address": "127.0.0.1","port": '$WARP_PORT'}]},"tag": "warp"}'
+    # 添加 路由规则 (Netflix, Disney, OpenAI, Spotify 走 WARP)
+    RULES+=',{"type": "field","outboundTag": "warp","domain": ["geosite:netflix","geosite:disney","geosite:openai","geosite:spotify","geosite:telegram"]}'
 fi
+OUTBOUNDS+=']'
+
+cat > "$XRAY_CONF" <<EOF
+{
+  "log": { "loglevel": "warning", "access": "$XRAY_LOG_DIR/access.log", "error": "$XRAY_LOG_DIR/error.log" },
+  "routing": {
+    "domainStrategy": "AsIs",
+    "rules": [ $RULES ]
+  },
+  "inbounds": [
+    {
+      "port": 10000,
+      "listen": "127.0.0.1",
+      "protocol": "vless",
+      "settings": { "clients": [{ "id": "${UUID}", "email": "admin" }], "decryption": "none" },
+      "streamSettings": { "network": "ws", "wsSettings": { "path": "${WS_PATH}" } }
+    },
+    {
+      "port": ${SOCKS_PORT},
+      "protocol": "socks",
+      "settings": { "auth": "password", "accounts": [{ "user": "${SOCKS_USER}", "pass": "${SOCKS_PASS}" }], "udp": true }
+    }
+  ],
+  "outbounds": $OUTBOUNDS
+}
+EOF
+
+# Nginx 配置文件
+cat > "/etc/nginx/conf.d/${DOMAIN}.conf" <<EOF
+server {
+    listen 80;
+    server_name ${DOMAIN};
+    return 301 https://\$host\$request_uri;
+}
+server {
+    listen 443 ssl http2;
+    server_name ${DOMAIN};
+    ssl_certificate /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
+    root ${WEB_ROOT};
+    location / { try_files \$uri \$uri/ =404; }
+    location ${WS_PATH} {
+        if (\$http_upgrade != "websocket") { return 404; }
+        proxy_redirect off;
+        proxy_pass http://127.0.0.1:10000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    }
+}
+EOF
+
+chown -R nobody:nogroup "$XRAY_LOG_DIR"
+systemctl restart xray nginx
+
+# ==============================================================================
+# 3. 部署 Python 机器人
+# ==============================================================================
+green "🐍 [阶段 3] 部署 Python 机器人"
+
+mkdir -p "$BOT_DIR" "$SCRIPT_DIR"
+CURRENT_DIR=$(cd "$(dirname "$0")";pwd)
+
+# 源码处理
+if [ -f "$CURRENT_DIR/src/main.py" ]; then
+    cp "$CURRENT_DIR/src/main.py" "$BOT_DIR/main.py"
+    cp "$CURRENT_DIR/requirements.txt" "$BOT_DIR/requirements.txt"
+else
+    touch "$BOT_DIR/main.py" # 占位
+    red "⚠️ 未找到本地源码，请后续手动上传 main.py"
+fi
+
+# 虚拟环境
+if [ ! -d "$BOT_DIR/venv" ]; then python3 -m venv "$BOT_DIR/venv"; fi
 source "$BOT_DIR/venv/bin/activate"
+pip install --upgrade pip >/dev/null 2>&1
+if [ -f "$BOT_DIR/requirements.txt" ]; then
+    pip install -r "$BOT_DIR/requirements.txt" >/dev/null 2>&1
+fi
 
-# 5. 复制代码与安装依赖
-echo -e "${YELLOW}🚚 正在部署代码并安装 Python 库...${PLAIN}"
-cp "$CURRENT_DIR/src/main.py" "$BOT_DIR/main.py"
-cp "$CURRENT_DIR/requirements.txt" "$BOT_DIR/requirements.txt"
-
-# 使用国内源加速 (可选，若服务器在海外可去掉 -i 部分)
-pip install -r "$BOT_DIR/requirements.txt" --upgrade
-echo -e "${GREEN}✅ 代码部署与依赖安装完成${PLAIN}"
-
-# 6. 交互式配置 (如果不存在配置)
-CONFIG_PATH="$BOT_DIR/config.json"
-if [ ! -f "$CONFIG_PATH" ]; then
-    echo -e "${BLUE}⚙️  检测到首次运行，开始配置...${PLAIN}"
-    read -p "请输入 Bot Token: " BOT_TOKEN
-    read -p "请输入管理员 ID (多个ID用逗号分隔): " ADMIN_IDS
-    read -p "请输入监控域名 (例如 mgny.112583.xyz): " DOMAIN
-
-    cat > "$CONFIG_PATH" <<EOF
+# 生成 Config
+cat > "$BOT_DIR/config.json" <<EOF
 {
   "bot_token": "$BOT_TOKEN",
   "admin_ids": [${ADMIN_IDS}],
@@ -79,17 +297,12 @@ if [ ! -f "$CONFIG_PATH" ]; then
   "log_files": ["/var/log/xray/error.log", "/var/log/xray/access.log"]
 }
 EOF
-    echo -e "${GREEN}✅ 配置文件已生成${PLAIN}"
-else
-    echo -e "${GREEN}✅ 检测到已有配置文件，跳过配置步骤${PLAIN}"
-fi
 
-# 7. Systemd 服务配置
-echo -e "${YELLOW}🛡️ 配置后台服务 (Systemd)...${PLAIN}"
+# Bot Systemd
 cat > /etc/systemd/system/nlbw_bot.service <<EOF
 [Unit]
-Description=NLBW Telegram Bot Service
-After=network.target
+Description=NLBW Python Controller
+After=network.target xray.service
 
 [Service]
 Type=simple
@@ -97,7 +310,7 @@ User=root
 WorkingDirectory=$BOT_DIR
 ExecStart=$BOT_DIR/venv/bin/python main.py
 Restart=always
-RestartSec=5
+RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
@@ -107,10 +320,61 @@ systemctl daemon-reload
 systemctl enable nlbw_bot >/dev/null 2>&1
 systemctl restart nlbw_bot
 
-# 8. 完成
-echo -e "${BLUE}================================================${PLAIN}"
-echo -e "${GREEN}🎉 部署成功！${PLAIN}"
-echo -e "🤖 机器人状态: $(systemctl is-active nlbw_bot)"
-echo -e "📂 部署位置: $BOT_DIR"
-echo -e "📝 配置文件: $CONFIG_PATH"
-echo -e "${BLUE}================================================${PLAIN}"
+# ==============================================================================
+# 4. 每日战报与异常推送 (Cron)
+# ==============================================================================
+green "📉 [阶段 4] 配置每日战报"
+
+# 创建战报脚本
+cat > "$SCRIPT_DIR/daily_report.sh" <<'EOF'
+#!/bin/bash
+# 自动读取 Bot 配置
+CONFIG_FILE="/opt/nlbw/tgbot/config.json"
+BOT_TOKEN=$(jq -r '.bot_token' $CONFIG_FILE)
+CHAT_ID=$(jq -r '.admin_ids[0]' $CONFIG_FILE) # 默认发给第一个管理员
+DOMAIN=$(jq -r '.domain' $CONFIG_FILE)
+
+# 采集数据
+DATE=$(date "+%Y-%m-%d %H:%M:%S")
+CPU=$(grep 'cpu ' /proc/stat | awk '{usage=($2+$4)*100/($2+$4+$5)} END {print usage}')
+MEM=$(free -m | grep Mem | awk '{print $3"/"$2"MB"}')
+TRAFFIC=$(vnstat --json m 1 | jq -r '.interfaces[0].traffic.month[0] | "⬇️" + (.rx | tostring) + "KB ⬆️" + (.tx | tostring) + "KB"')
+
+# 发送消息
+TEXT="📊 *NLBW Daily Report*
+📅 Time: \`$DATE\`
+💻 Domain: \`$DOMAIN\`
+🧠 Mem: \`$MEM\`
+⚡ CPU: \`$CPU%\`
+🌐 Traffic (Month): \`$TRAFFIC\`"
+
+curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+    -d chat_id="${CHAT_ID}" \
+    -d parse_mode="Markdown" \
+    -d text="$TEXT" >/dev/null
+EOF
+
+chmod +x "$SCRIPT_DIR/daily_report.sh"
+
+# 添加 Crontab (每天早上 08:00 执行)
+(crontab -l 2>/dev/null; echo "0 8 * * * /bin/bash $SCRIPT_DIR/daily_report.sh") | crontab -
+green "✅ 定时任务已添加 (每天 08:00)"
+
+# ==============================================================================
+# 5. 结束汇总
+# ==============================================================================
+VLESS_LINK="vless://${UUID}@${DOMAIN}:443?encryption=none&security=tls&type=ws&host=${DOMAIN}&path=${WS_PATH}#${DOMAIN}"
+
+clear
+echo -e "\033[1;36m================================================\033[0m"
+echo -e "\033[1;32m🎉 NLBW Ultra System Deployment Complete!\033[0m"
+echo -e "------------------------------------------------"
+echo -e "📂 部署目录: \033[1;33m/opt/nlbw\033[0m"
+echo -e "🤖 Bot 状态: $(systemctl is-active nlbw_bot)"
+echo -e "🛡️ 防火墙  : 已开启 (Port 80, 443, $SSH_PORT, 20000-50000)"
+echo -e "☁️ WARP    : $(if [[ "$WARP_ENABLE" == "true" ]]; then echo "✅ 已接管流媒体流量"; else echo "❌ 未启用"; fi)"
+echo -e "📉 战报    : 每日 08:00 推送"
+echo -e "------------------------------------------------"
+echo -e "🔗 VLESS 链接:"
+echo -e "\033[1;35m$VLESS_LINK\033[0m"
+echo -e "\033[1;36m================================================\033[0m"
