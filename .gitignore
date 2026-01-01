@@ -1,18 +1,21 @@
-# 忽略 Python 编译文件
+# --- Python 编译文件 ---
 __pycache__/
 *.py[cod]
 
-# 忽略 虚拟环境
+# --- 虚拟环境 (体积大，无需上传) ---
 venv/
 env/
 
-# ⚠️ 忽略 敏感配置文件 (绝对不能上传)
+# --- 敏感配置文件 (绝对严禁上传) ---
 config.json
+tgbot/config.json
 src/config.json
+*.env
 
-# 忽略 日志文件
+# --- 运行日志 ---
 *.log
-/var/log/
+logs/
 
-# 忽略 系统生成文件
+# --- 系统缓存 ---
 .DS_Store
+Thumbs.db
