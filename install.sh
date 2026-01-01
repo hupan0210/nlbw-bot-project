@@ -1,7 +1,8 @@
 #!/bin/bash
 # ==============================================================================
-# NLBW Ultra: 全栈节点自动化部署系统
-# 功能: 系统初始化 + Swap/BBR + 防火墙 + WARP解锁 + 定时战报 + Python机器人
+# NLBW Ultra: 全栈节点自动化部署系统 (Lite版)
+# 功能: 系统初始化 + Swap/BBR + 防火墙 + 定时战报 + Python机器人
+# 修复: AWS端口检测 / Crontab空表 / 路径错误 / 移除WARP
 # 部署路径: /opt/nlbw
 # ==============================================================================
 
@@ -25,7 +26,7 @@ if [[ $EUID -ne 0 ]]; then red "❌ 错误: 必须使用 root 运行"; exit 1; f
 
 clear
 echo -e "\033[1;36m================================================\033[0m"
-echo -e "\033[1;36m      🤖 NLBW 全栈节点部署系统 (Ultra v4.0)     \033[0m"
+echo -e "\033[1;36m      🤖 NLBW 全栈节点部署系统 (Ultra Lite)     \033[0m"
 echo -e "\033[1;36m================================================\033[0m"
 
 # ==============================================================================
@@ -34,16 +35,16 @@ echo -e "\033[1;36m================================================\033[0m"
 green "🚀 [阶段 0] 系统初始化与安全加固"
 
 # 0.1 更新与基础工具
-green "📦 [1/5] 更新系统并安装必备工具..."
+green "📦 [1/4] 更新系统并安装必备工具..."
 apt-get update -y && apt-get upgrade -y
 apt-get install -y curl wget git htop vim jq tar gzip unzip socat cron lsb-release gnupg >/dev/null 2>&1
 
 # 0.2 时区
-green "🕒 [2/5] 同步时区至 Asia/Shanghai..."
+green "🕒 [2/4] 同步时区至 Asia/Shanghai..."
 timedatectl set-timezone Asia/Shanghai
 
 # 0.3 智能 Swap
-green "💾 [3/5] 检查内存配置..."
+green "💾 [3/4] 检查内存配置..."
 PHY_MEM=$(free -m | grep Mem | awk '{print $2}')
 SWAP_MEM=$(free -m | grep Swap | awk '{print $2}')
 if [ "$PHY_MEM" -le 2048 ] && [ "$SWAP_MEM" -eq 0 ]; then
@@ -59,7 +60,7 @@ else
 fi
 
 # 0.4 BBR 加速
-green "🚀 [4/5] 检查 BBR 加速..."
+green "🚀 [4/4] 检查 BBR 加速..."
 if ! sysctl net.ipv4.tcp_congestion_control | grep -q "bbr"; then
     echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
     echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
@@ -71,14 +72,16 @@ fi
 
 # 0.5 自动防火墙 (Auto Firewall)
 green "🛡️ [5/5] 配置自动防火墙..."
-SSH_PORT=$(grep "^Port" /etc/ssh/sshd_config | head -n 1 | awk '{print $2}' || true)
-SSH_PORT=${SSH_PORT:-22} # 默认为 22
+
+# [修复] 增加默认值回退逻辑，防止 grep 为空导致脚本退出
+SSH_PORT=$(grep "^Port" /etc/ssh/sshd_config | head -n 1 | awk '{print $2}' || echo "22")
+SSH_PORT=${SSH_PORT:-22} 
 
 if command -v ufw >/dev/null; then
     ufw allow 80/tcp
     ufw allow 443/tcp
     ufw allow ${SSH_PORT}/tcp
-    # 允许 Socks5 端口范围 (防止改端口后连不上)
+    # 允许 Socks5 端口范围
     ufw allow 20000:50000/tcp
     ufw --force enable
     green "✅ UFW 防火墙规则已更新"
@@ -120,15 +123,9 @@ while true; do
 done
 
 while true; do
-    read -r -p "管理员 ID (多个用逗号分隔): " ADMIN_IDS
+    read -r -p "管理员 ID (多个用英文逗号分隔): " ADMIN_IDS
     if [[ -n "$ADMIN_IDS" ]]; then break; fi
 done
-
-# 询问是否开启 WARP
-yellow "🎥 是否开启 WARP 流媒体解锁 (Netflix/Disney+)? [y/N]"
-read -r WARP_CHOICE
-WARP_ENABLE=false
-if [[ "$WARP_CHOICE" =~ ^[Yy]$ ]]; then WARP_ENABLE=true; fi
 
 # 生成随机凭证
 UUID="$(cat /proc/sys/kernel/random/uuid)"
@@ -150,59 +147,24 @@ if ! command -v xray &> /dev/null; then
     bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >/dev/null
 fi
 
-# 2.3 安装 WARP (如果启用)
-WARP_PORT=40000
-if [[ "$WARP_ENABLE" == "true" ]]; then
-    green "☁️ 正在安装 Cloudflare WARP 官方客户端..."
-    # 添加官方源
-    curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-    echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/cloudflare-client.list >/dev/null
-    apt-get update -y >/dev/null 2>&1
-    apt-get install -y cloudflare-warp >/dev/null 2>&1
-    
-    # 注册并配置为 Socks5 模式 (最稳定的模式，不影响 SSH)
-    green "🔗 注册 WARP..."
-    warp-cli register --accept-tos >/dev/null 2>&1 || true # 可能已注册
-    warp-cli set-mode proxy >/dev/null 2>&1
-    warp-cli set-proxy-port $WARP_PORT >/dev/null 2>&1
-    warp-cli connect >/dev/null 2>&1
-    
-    # 检查连接
-    sleep 3
-    if curl -s -x socks5h://127.0.0.1:$WARP_PORT https://www.cloudflare.com/cdn-cgi/trace | grep -q "warp=on"; then
-        green "✅ WARP 启动成功 (Socks5 Port: $WARP_PORT)"
-    else
-        red "⚠️ WARP 启动失败或网络不通，后续将回退至直连模式。"
-        WARP_ENABLE=false
-    fi
-fi
-
-# 2.4 配置 Nginx
+# 2.3 配置 Nginx
 WEB_ROOT="/var/www/${DOMAIN}/html"
 mkdir -p "$WEB_ROOT"
 echo "<h1>NLBW Node Active</h1>" > "$WEB_ROOT/index.html"
 chown -R www-data:www-data "/var/www/${DOMAIN}"
 
-# 2.5 申请证书
+# 2.4 申请证书
 systemctl stop nginx
 certbot certonly --standalone -d "$DOMAIN" --email "$EMAIL" --agree-tos --non-interactive >/dev/null 2>&1 || { red "❌ 证书申请失败，请检查域名解析"; exit 1; }
 systemctl start nginx
 
-# 2.6 生成 Xray 配置 (动态生成)
-green "⚙️ 生成 Xray 配置文件 (智能路由)..."
+# 2.5 生成 Xray 配置 (已移除 WARP 逻辑)
+green "⚙️ 生成 Xray 配置文件..."
 mkdir -p "$XRAY_LOG_DIR"
 
-# 构建 Outbounds 配置
-OUTBOUNDS='[{"protocol": "freedom","tag": "direct"}'
+# 构建纯净的 Outbounds 配置
+OUTBOUNDS='[{"protocol": "freedom","tag": "direct"}]'
 RULES='{"type": "field","outboundTag": "direct","domain": ["geosite:cn"]}'
-
-if [[ "$WARP_ENABLE" == "true" ]]; then
-    # 添加 WARP 出口
-    OUTBOUNDS+=',{"protocol": "socks","settings": {"servers": [{"address": "127.0.0.1","port": '$WARP_PORT'}]},"tag": "warp"}'
-    # 添加 路由规则 (Netflix, Disney, OpenAI, Spotify 走 WARP)
-    RULES+=',{"type": "field","outboundTag": "warp","domain": ["geosite:netflix","geosite:disney","geosite:openai","geosite:spotify","geosite:telegram"]}'
-fi
-OUTBOUNDS+=']'
 
 cat > "$XRAY_CONF" <<EOF
 {
@@ -268,10 +230,11 @@ green "🐍 [阶段 3] 部署 Python 机器人"
 mkdir -p "$BOT_DIR" "$SCRIPT_DIR"
 CURRENT_DIR=$(cd "$(dirname "$0")";pwd)
 
-# 源码处理
+# 源码处理 - [修复] 修正复制路径，从 src/ 目录复制
 if [ -f "$CURRENT_DIR/src/main.py" ]; then
     cp "$CURRENT_DIR/src/main.py" "$BOT_DIR/main.py"
-    cp "$CURRENT_DIR/requirements.txt" "$BOT_DIR/requirements.txt"
+    # [修复] 确保 requirements.txt 也从 src/ 复制
+    cp "$CURRENT_DIR/src/requirements.txt" "$BOT_DIR/requirements.txt"
 else
     touch "$BOT_DIR/main.py" # 占位
     red "⚠️ 未找到本地源码，请后续手动上传 main.py"
@@ -357,7 +320,8 @@ EOF
 chmod +x "$SCRIPT_DIR/daily_report.sh"
 
 # 添加 Crontab (每天早上 08:00 执行)
-(crontab -l 2>/dev/null; echo "0 8 * * * /bin/bash $SCRIPT_DIR/daily_report.sh") | crontab -
+
+(crontab -l 2>/dev/null || true; echo "0 8 * * * /bin/bash $SCRIPT_DIR/daily_report.sh") | crontab -
 green "✅ 定时任务已添加 (每天 08:00)"
 
 # ==============================================================================
@@ -372,7 +336,6 @@ echo -e "------------------------------------------------"
 echo -e "📂 部署目录: \033[1;33m/opt/nlbw\033[0m"
 echo -e "🤖 Bot 状态: $(systemctl is-active nlbw_bot)"
 echo -e "🛡️ 防火墙  : 已开启 (Port 80, 443, $SSH_PORT, 20000-50000)"
-echo -e "☁️ WARP    : $(if [[ "$WARP_ENABLE" == "true" ]]; then echo "✅ 已接管流媒体流量"; else echo "❌ 未启用"; fi)"
 echo -e "📉 战报    : 每日 08:00 推送"
 echo -e "------------------------------------------------"
 echo -e "🔗 VLESS 链接:"
