@@ -37,7 +37,7 @@ git clone [https://github.com/hupan0210/nlbw-bot-project.git](https://github.com
 cd nlbw-bot-project
 ```
 ```bash
-# 3. 授权并安装
+### 3. 授权并安装
 chmod +x install.sh
 ./install.sh
 ```
