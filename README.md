@@ -16,13 +16,28 @@
 
 在 VPS 上以 Root 身份执行以下命令：
 
-### 1. 拉取代码
+### 1. 安装 Git（如果系统未安装）
+```bash
+# 自动检测并安装 git
+if ! command -v git >/dev/null 2>&1; then
+echo "[+] Git 未安装，正在自动安装..."
+if command -v apt >/dev/null 2>&1; then
+apt update && apt install -y git
+elif command -v yum >/dev/null 2>&1; then
+yum install -y git
+else
+echo "[-] 不支持的系统，无法自动安装 Git"
+exit 1
+fi
+fi
+```
+### 2. 拉取代码
 ```bash
 git clone [https://github.com/hupan0210/nlbw-bot-project.git](https://github.com/hupan0210/nlbw-bot-project.git)
 cd nlbw-bot-project
 ```
 ```bash
-# 2. 授权并安装
+# 3. 授权并安装
 chmod +x install.sh
 ./install.sh
 ```
